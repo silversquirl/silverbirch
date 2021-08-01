@@ -12,20 +12,35 @@ fn mainLoop(loop: *io.EventLoop) !void {
 
     while (true) {
         const conn = try listener.accept();
-        try loop.runDetached(allocator, handleClient, .{conn});
+        try loop.runDetached(allocator, clientTask, .{ allocator, conn });
     }
 }
 
-fn handleClient(conn: io.Listener.Connection) void {
-    defer conn.sock.close();
-    const w = conn.sock.writer();
-
-    w.writeAll("Hello, world!\n") catch |err| {
+fn clientTask(allocator: *std.mem.Allocator, conn: io.Listener.Connection) void {
+    handleClient(allocator, conn) catch |err| {
         std.debug.print("{s}\n", .{@errorName(err)});
         if (@errorReturnTrace()) |trace| {
             std.debug.dumpStackTrace(trace.*);
         }
     };
+}
+fn handleClient(allocator: *std.mem.Allocator, conn: io.Listener.Connection) !void {
+    defer conn.sock.close();
+    std.debug.print("{} connected\n", .{conn.addr});
+    defer std.debug.print("{} disconnected\n", .{conn.addr});
+
+    const r = std.io.bufferedReader(conn.sock.reader()).reader();
+    const w = conn.sock.writer();
+
+    var buf = std.ArrayList(u8).init(allocator);
+    while (r.readUntilDelimiterArrayList(&buf, '\n', 1 << 20)) |_| {
+        try buf.append('\n');
+        try w.writeAll(buf.items);
+    } else |err| switch (err) {
+        error.WouldBlock => unreachable, // Not a non-blocking socket
+        error.EndOfStream => {},
+        else => |e| return e,
+    }
 }
 
 pub fn main() !u8 {

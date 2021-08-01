@@ -27,8 +27,17 @@ pub fn close(self: Socket) void {
     self.loop.close(self.fd);
 }
 
+pub fn read(self: Socket, buf: []u8) ReadError!usize {
+    return try self.loop.recv(self.fd, buf);
+}
 pub fn write(self: Socket, buf: []const u8) WriteError!usize {
     return try self.loop.send(self.fd, buf);
+}
+
+pub const ReadError = EventLoop.RecvError;
+pub const Reader = std.io.Reader(Socket, ReadError, read);
+pub fn reader(self: Socket) Reader {
+    return Reader{ .context = self };
 }
 
 pub const WriteError = EventLoop.SendError;

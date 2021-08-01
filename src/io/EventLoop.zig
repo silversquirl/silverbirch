@@ -51,11 +51,30 @@ pub fn close(self: *EventLoop, fd: os.fd_t) void {
     }
 }
 
-pub fn write(self: *EventLoop, fd: os.fd_t, buf: []const u8) !u31 {
-    const res = try self.submit(.write, .{ fd, buf, 0 });
-    _ = res;
-    @compileError("TODO");
+pub fn recv(self: *EventLoop, fd: os.socket_t, buf: []u8) RecvError!u31 {
+    const res = try self.submit(.recv, .{ fd, buf, 0 });
+    switch (errno(res)) {
+        0 => return @intCast(u31, res),
+
+        os.EBADF => unreachable, // always a race condition
+        os.EFAULT => unreachable,
+        os.EINVAL => unreachable,
+        os.ENOTCONN => unreachable,
+        os.ENOTSOCK => unreachable,
+        os.EAGAIN => return error.WouldBlock,
+        os.ENOMEM => return error.SystemResources,
+        os.ECONNREFUSED => return error.ConnectionRefused,
+        os.ECONNRESET => return error.ConnectionResetByPeer,
+        else => |err| return os.unexpectedErrno(err),
+    }
 }
+pub const RecvError = error{
+    WouldBlock,
+    SystemResources,
+    ConnectionRefused,
+    ConnectionResetByPeer,
+} || SubmitError;
+
 pub fn send(self: *EventLoop, fd: os.socket_t, buf: []const u8) SendError!u31 {
     const res = try self.submit(.send, .{ fd, buf, 0 });
     return switch (errno(res)) {
