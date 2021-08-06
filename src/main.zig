@@ -3,22 +3,39 @@ const io = @import("io.zig");
 
 fn mainLoop(loop: *io.EventLoop) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer std.debug.assert(!gpa.deinit());
+    defer _ = gpa.deinit();
     const allocator = &gpa.allocator;
+
+    const sigf = try loop.signalOpen(&.{ .int, .hup });
+    defer sigf.close();
+    var sig_future = io.future(&async sigf.capture());
 
     const addr = try std.net.Address.resolveIp("::", 8080);
     const listener = try loop.listen(addr, .{ .backlog = 100, .reuseaddr = true });
     defer listener.close();
 
+    var sock_frame: @Frame(io.Listener.accept) = undefined;
     while (true) {
-        const conn = try listener.accept();
-        try loop.runDetached(allocator, clientTask, .{ allocator, conn });
+        sock_frame = async listener.accept();
+        var sock_future = io.future(&sock_frame);
+        switch (try loop.any(.{ .sig = &sig_future, .sock = &sock_future })) {
+            .sig => |sig| {
+                _ = try sig;
+                break;
+            },
+            .sock => |conn| {
+                try loop.runDetached(allocator, clientTask, .{ allocator, try conn });
+            },
+        }
     }
+
+    // TODO: cleanly terminate connections
+    std.debug.print("Exiting\n", .{});
 }
 
 fn clientTask(allocator: *std.mem.Allocator, conn: io.Listener.Connection) void {
     handleClient(allocator, conn) catch |err| {
-        std.debug.print("{s}\n", .{@errorName(err)});
+        std.debug.print("Error in client '{}': {s}\n", .{ conn.addr, @errorName(err) });
         if (@errorReturnTrace()) |trace| {
             std.debug.dumpStackTrace(trace.*);
         }
@@ -33,6 +50,7 @@ fn handleClient(allocator: *std.mem.Allocator, conn: io.Listener.Connection) !vo
     const w = conn.sock.writer();
 
     var buf = std.ArrayList(u8).init(allocator);
+    defer buf.deinit();
     while (r.readUntilDelimiterArrayList(&buf, '\n', 1 << 20)) |_| {
         try buf.append('\n');
         try w.writeAll(buf.items);
@@ -52,11 +70,7 @@ pub fn main() !u8 {
         else => |e| return e,
     };
     defer loop.deinit();
-
-    nosuspend {
-        var frame = async mainLoop(&loop);
-        try await frame;
-    }
+    try loop.run(mainLoop, .{&loop});
 
     return 0;
 }
