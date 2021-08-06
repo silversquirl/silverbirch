@@ -108,14 +108,46 @@ fn longest(queues: anytype) std.meta.FieldEnum(@TypeOf(queues)) {
     return q;
 }
 
+/// Yield to the event loop, allowing other tasks to run.
+/// Can be used by CPU-bound tasks to run concurrently with other tasks.
+pub fn yield(self: *EventLoop) void {
+    var node = TaskQueue.Node{ .data = @frame() };
+    self.cpu_q.prepend(&node);
+    suspend {}
+}
+
+/// Yield to the event loop, waiting for at least one other task to progress.
+/// Can be used by task-bound tasks to wait on one or more other tasks.
+pub fn wait(self: *EventLoop) Waiter {
+    return .{ .loop = self };
+}
+// TODO: thread
+pub const Waiter = struct {
+    loop: *EventLoop,
+    node: TaskQueue.Node = .{ .data = undefined },
+
+    pub fn start(self: *Waiter) void {
+        self.node.data = @frame();
+        self.loop.wait_q.prepend(&self.node);
+        suspend {}
+    }
+    pub fn retry(self: *Waiter) void {
+        self.loop.waiting = true;
+        self.node.data = @frame();
+        suspend {}
+    }
+    pub fn finish(self: *Waiter) void {
+        self.loop.waiting = false;
+        self.loop.wait_q.remove(&self.node);
+    }
+};
+
 pub fn runDetached(self: *EventLoop, allocator: *std.mem.Allocator, comptime func: anytype, args: anytype) !void {
     _ = self;
     const Args = @TypeOf(args);
     const wrapper = struct {
         fn wrapper(loop: *EventLoop, walloc: *std.mem.Allocator, wargs: Args) void {
-            var node = TaskQueue.Node{ .data = @frame() };
-            loop.cpu_q.prepend(&node);
-            suspend {}
+            loop.yield();
             @call(.{}, func, wargs);
             suspend {
                 walloc.destroy(@frame());
@@ -125,10 +157,6 @@ pub fn runDetached(self: *EventLoop, allocator: *std.mem.Allocator, comptime fun
     const frame = try allocator.create(@Frame(wrapper));
     frame.* = async wrapper(self, allocator, args);
 }
-
-pub const listen = @import("Listener.zig").open;
-pub const connect = @import("Socket.zig").open;
-pub const signalOpen = @import("SignalFile.zig").open;
 
 /// Wait for completion of any of the provided futures
 // TODO: allow anyframe instead of needing Future. See ziglang/zig#3164
@@ -150,22 +178,19 @@ pub fn any(self: *EventLoop, alternatives: anytype) !AnyRet(@TypeOf(alternatives
     }
 
     // Wait for completion
-    var node = TaskQueue.Node{ .data = @frame() };
-    self.wait_q.prepend(&node);
-    suspend {}
+    var w = self.wait();
+    w.start();
     while (true) {
         // Slow for large numbers of alternatives, might be worth using a flag
         inline for (fields) |field| {
             const future = @field(alternatives, field);
             if (future.value) |value| {
-                self.waiting = false;
-                self.wait_q.remove(&node);
+                w.finish();
                 return @unionInit(Ret, field, value);
             }
         }
 
-        self.waiting = true;
-        suspend {}
+        w.retry();
     }
 }
 // TODO: support pointer to struct as well as struct of pointers
@@ -189,6 +214,10 @@ pub fn AnyRet(comptime Alts: type) type {
     ti.Union.fields = &fields;
     return @Type(ti);
 }
+
+pub const listen = @import("Listener.zig").open;
+pub const connect = @import("Socket.zig").open;
+pub const signalOpen = @import("SignalFile.zig").open;
 
 //// For internal use ////
 
