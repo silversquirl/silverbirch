@@ -11,8 +11,18 @@ pub fn main() !u8 {
         else => |e| return e,
     };
     defer loop.deinit();
-    var server = Server{ .loop = &loop };
-    try loop.run(Server.mainLoop, .{&server});
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = &gpa.allocator;
+
+    try loop.run(ioMain, .{ allocator, &loop });
 
     return 0;
+}
+
+fn ioMain(allocator: *std.mem.Allocator, loop: *io.EventLoop) !void {
+    var server = try Server.init(allocator, loop);
+    defer server.deinit();
+    try server.mainLoop();
 }
