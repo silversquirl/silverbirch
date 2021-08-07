@@ -116,8 +116,7 @@ pub fn yield(self: *EventLoop) void {
     suspend {}
 }
 
-/// Yield to the event loop, waiting for at least one other task to progress.
-/// Can be used by task-bound tasks to wait on one or more other tasks.
+/// Create a waiter, which can be used to wait for other tasks to progress.
 pub fn wait(self: *EventLoop) Waiter {
     return .{ .loop = self };
 }
@@ -126,16 +125,23 @@ pub const Waiter = struct {
     loop: *EventLoop,
     node: TaskQueue.Node = .{ .data = undefined },
 
+    /// Yield to the event loop, waiting for at least one other task to progress.
+    /// Can be used by task-bound tasks to wait on one or more other tasks.
+    /// After this returns, either retry or finish must be called before any suspending functions.
     pub fn start(self: *Waiter) void {
         self.node.data = @frame();
         self.loop.wait_q.prepend(&self.node);
         suspend {}
     }
+    /// Yield back to the event loop after start returns. Call this if the waited-upon tasks have not progressed sufficiently.
+    /// After this returns, either retry or finish must be called before any suspending functions.
     pub fn retry(self: *Waiter) void {
         self.loop.waiting = true;
         self.node.data = @frame();
         suspend {}
     }
+    /// Finish the wait. Call this if the waited-upon tasks have progressed sufficiently to allow work to be done on this task.
+    /// After this is called, start must be called again if the waiter is to be reused.
     pub fn finish(self: *Waiter) void {
         self.loop.waiting = false;
         self.loop.wait_q.remove(&self.node);
@@ -321,9 +327,21 @@ pub fn connectRaw(self: *EventLoop, fd: os.socket_t, addr: *const os.sockaddr, a
 const SubmitError = @typeInfo(@typeInfo(@TypeOf(os.linux.IO_Uring.submit)).Fn.return_type.?).ErrorUnion.error_set;
 fn submit(self: *EventLoop, comptime op: DeclEnum(os.linux.IO_Uring), args: anytype) SubmitError!i32 {
     var data = SubmissionData{ .frame = @frame() };
-    _ = @call(.{}, @field(self.uring, @tagName(op)), .{@ptrToInt(&data)} ++ args) catch |err| switch (err) {
+    const func = @field(os.linux.IO_Uring, @tagName(op));
+    const fargs = .{ &self.uring, @ptrToInt(&data) } ++ args;
+
+    var waiter = self.wait();
+    _ = @call(.{}, func, fargs) catch |err| switch (err) {
         error.SubmissionQueueFull => {
-            @panic("TODO");
+            waiter.start();
+            while (true) {
+                if (@call(.{}, func, fargs)) |_| {
+                    break;
+                } else |_| {
+                    waiter.retry();
+                }
+            }
+            waiter.finish();
         },
     };
 
