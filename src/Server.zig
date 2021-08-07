@@ -89,6 +89,7 @@ fn handleClient(self: *Server, conn: io.Listener.Connection) !void {
                     error.EndOfStream => return,
                     else => |e| return e,
                 };
+
                 try buf.append('\n');
                 try w.writeAll(buf.items);
             },
