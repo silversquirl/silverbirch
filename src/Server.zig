@@ -40,7 +40,7 @@ pub fn mainLoop(self: *Server) !void {
     while (true) {
         sock_frame = async self.listener.accept();
         var sock_future = io.future(&sock_frame);
-        switch (try self.loop.any(.{ .sig = &sig_future, .sock = &sock_future })) {
+        switch (self.loop.any(.{ .sig = &sig_future, .sock = &sock_future })) {
             .sig => |sig| {
                 _ = try sig;
                 break;
@@ -81,7 +81,7 @@ fn handleClient(self: *Server, conn: io.Listener.Connection) !void {
     while (true) {
         read_frame = async r.readUntilDelimiterArrayList(&buf, '\n', 1 << 20);
         var read_future = io.future(&read_frame);
-        switch (try self.loop.any(.{ .quit = &self.quit, .read = &read_future })) {
+        switch (self.loop.any(.{ .quit = &self.quit, .read = &read_future })) {
             .quit => return,
             .read => |res| {
                 res catch |err| switch (err) {

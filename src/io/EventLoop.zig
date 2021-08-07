@@ -169,7 +169,7 @@ pub fn runDetached(self: *EventLoop, allocator: *std.mem.Allocator, comptime fun
 // TODO: add support for WaitGroup?
 // TODO: use anyframe instead of Future. See ziglang/zig#3164
 // TODO: thread
-pub fn any(self: *EventLoop, alternatives: anytype) !AnyRet(@TypeOf(alternatives)) {
+pub fn any(self: *EventLoop, alternatives: anytype) AnyRet(@TypeOf(alternatives)) {
     const Alts = @TypeOf(alternatives);
     const Ret = AnyRet(Alts);
     const fields = comptime std.meta.fields(Alts);
