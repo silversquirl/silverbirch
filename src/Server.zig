@@ -5,6 +5,8 @@ allocator: *std.mem.Allocator,
 loop: *io.EventLoop,
 sigf: io.SignalFile,
 listener: io.Listener,
+quit: io.Flag,
+group: io.WaitGroup,
 
 const Server = @This();
 
@@ -21,6 +23,8 @@ pub fn init(allocator: *std.mem.Allocator, loop: *io.EventLoop) !Server {
         .loop = loop,
         .sigf = sigf,
         .listener = listener,
+        .quit = loop.flag(),
+        .group = loop.waitGroup(),
     };
 }
 
@@ -42,16 +46,19 @@ pub fn mainLoop(self: *Server) !void {
                 break;
             },
             .sock => |conn| {
+                self.group.add(1);
                 try self.loop.runDetached(self.allocator, clientTask, .{ self, try conn });
             },
         }
     }
 
-    // TODO: cleanly terminate connections
+    std.debug.assert(self.quit.set());
     std.debug.print("Exiting\n", .{});
+    self.group.wait();
 }
 
 fn clientTask(self: *Server, conn: io.Listener.Connection) void {
+    defer self.group.done();
     self.handleClient(conn) catch |err| {
         std.debug.print("Error in client '{}': {s}\n", .{ conn.addr, @errorName(err) });
         if (@errorReturnTrace()) |trace| {
@@ -69,12 +76,22 @@ fn handleClient(self: *Server, conn: io.Listener.Connection) !void {
 
     var buf = std.ArrayList(u8).init(self.allocator);
     defer buf.deinit();
-    while (r.readUntilDelimiterArrayList(&buf, '\n', 1 << 20)) |_| {
-        try buf.append('\n');
-        try w.writeAll(buf.items);
-    } else |err| switch (err) {
-        error.WouldBlock => unreachable, // Not a non-blocking socket
-        error.EndOfStream => {},
-        else => |e| return e,
+    var read_frame: @Frame(@TypeOf(r).readUntilDelimiterArrayList) = undefined;
+
+    while (true) {
+        read_frame = async r.readUntilDelimiterArrayList(&buf, '\n', 1 << 20);
+        var read_future = io.future(&read_frame);
+        switch (try self.loop.any(.{ .quit = &self.quit, .read = &read_future })) {
+            .quit => return,
+            .read => |res| {
+                res catch |err| switch (err) {
+                    error.WouldBlock => unreachable, // Not a non-blocking socket
+                    error.EndOfStream => return,
+                    else => |e| return e,
+                };
+                try buf.append('\n');
+                try w.writeAll(buf.items);
+            },
+        }
     }
 }

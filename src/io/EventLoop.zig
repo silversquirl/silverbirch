@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const os = std.os;
+const Flag = @import("Flag.zig");
 
 uring: os.linux.IO_Uring, // For IO-bound tasks
 // TODO: thread
@@ -164,35 +165,48 @@ pub fn runDetached(self: *EventLoop, allocator: *std.mem.Allocator, comptime fun
     frame.* = async wrapper(self, allocator, args);
 }
 
-/// Wait for completion of any of the provided futures
-// TODO: allow anyframe instead of needing Future. See ziglang/zig#3164
+/// Wait for completion of any of the provided futures or flags
+// TODO: add support for WaitGroup?
+// TODO: use anyframe instead of Future. See ziglang/zig#3164
 // TODO: thread
 pub fn any(self: *EventLoop, alternatives: anytype) !AnyRet(@TypeOf(alternatives)) {
     const Alts = @TypeOf(alternatives);
     const Ret = AnyRet(Alts);
-    const fields = comptime std.meta.fieldNames(Alts);
+    const fields = comptime std.meta.fields(Alts);
 
     // Launch waiters
     inline for (fields) |field| {
-        const future = @field(alternatives, field);
-        if (future.value) |value| {
-            return @unionInit(Ret, field, value);
-        }
-        if (!future.waiting) {
-            _ = async @field(alternatives, field).wait();
+        const f = @field(alternatives, field.name);
+        if (field.field_type == *Flag) {
+            if (f.value) {
+                return @unionInit(Ret, field.name, {});
+            }
+        } else {
+            if (f.value) |value| {
+                return @unionInit(Ret, field.name, value);
+            }
+            if (!f.waiting) {
+                _ = async @field(alternatives, field.name).wait();
+            }
         }
     }
 
     // Wait for completion
     var w = self.wait();
     w.start();
+    defer w.finish();
     while (true) {
         // Slow for large numbers of alternatives, might be worth using a flag
         inline for (fields) |field| {
-            const future = @field(alternatives, field);
-            if (future.value) |value| {
-                w.finish();
-                return @unionInit(Ret, field, value);
+            const f = @field(alternatives, field.name);
+            if (field.field_type == *Flag) {
+                if (f.value) {
+                    return @unionInit(Ret, field.name, {});
+                }
+            } else {
+                if (f.value) |value| {
+                    return @unionInit(Ret, field.name, value);
+                }
             }
         }
 
@@ -204,14 +218,20 @@ pub fn AnyRet(comptime Alts: type) type {
     var fields: [std.meta.fields(Alts).len]std.builtin.TypeInfo.UnionField = undefined;
     for (std.meta.fields(Alts)) |field, i| {
         const ptr = @typeInfo(field.field_type).Pointer;
-        if (ptr.is_const or !@hasDecl(ptr.child, "Value")) {
-            @compileError(std.fmt.comptimePrint("Expected pointer to future, got {s} (field '{}')", .{
+        if (ptr.is_const or ptr.size != .One or
+            !(ptr.child == Flag or @hasDecl(ptr.child, "Value")))
+        {
+            @compileError(std.fmt.comptimePrint("Expected pointer to flag or future, got {s} (field '{}')", .{
                 @typeName(field.field_type),
                 std.fmt.fmtSliceEscapeLower(field.name),
             }));
         }
-        const T = ptr.child.Value;
-        fields[i] = .{ .name = field.name, .field_type = T, .alignment = @alignOf(T) };
+        const T = if (ptr.child == Flag) void else ptr.child.Value;
+        fields[i] = .{
+            .name = field.name,
+            .field_type = T,
+            .alignment = if (@sizeOf(T) > 0) @alignOf(T) else 0,
+        };
     }
 
     // Workaround for ziglang/zig#8114. Why does it work? No clue!
@@ -221,9 +241,14 @@ pub fn AnyRet(comptime Alts: type) type {
     return @Type(ti);
 }
 
-pub const listen = @import("Listener.zig").open;
+// IO resources
 pub const connect = @import("Socket.zig").open;
+pub const listen = @import("Listener.zig").open;
 pub const signalOpen = @import("SignalFile.zig").open;
+
+// Sync primitives
+pub const flag = Flag.init;
+pub const waitGroup = @import("WaitGroup.zig").init;
 
 //// For internal use ////
 
